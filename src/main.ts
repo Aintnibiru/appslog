@@ -1,7 +1,7 @@
 import { DomQueryCache } from './core/dom-cache';
 import { splitRow, lengthVariants } from './features/material-parser';
 import { parseHargaValues } from './features/price-parser';
-import { doQuickRedirect } from './features/redirect';
+import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features/redirect';
 
 (function () {
   'use strict';
@@ -45,16 +45,18 @@ import { doQuickRedirect } from './features/redirect';
   // bisa menambah baris dobel dari snapshot jumlah baris yang sama.
   let busyJob = null;
   const JOB_BUTTONS = ['btnGoRedirect', 'btnNewTabRedirect', 'btnApplyTambah', 'btnApplyMaterial', 'btnApplyHarga'];
-  async function runExclusive(label, fn) {
+  async function runExclusive(label, fn, activeBtnId?: string) {
     if (busyJob) return toast(`Tunggu — "${busyJob}" masih berjalan.`);
     busyJob = label;
     const markBusy = busy => {
       JOB_BUTTONS.forEach(id => {
         const b = document.getElementById(id);
-        if (b) { b.setAttribute('aria-busy', busy ? 'true' : 'false'); b.style.opacity = busy ? '0.6' : ''; }
+        if (!b) return;
+        b.setAttribute('aria-busy', busy ? 'true' : 'false');
+        if (!busy || id === activeBtnId) b.classList.toggle('is-busy', busy);
       });
       const dot = document.getElementById('gabunganStatusDot');
-      if (dot) dot.style.background = busy ? '#f59e0b' : '';
+      if (dot) dot.classList.toggle('is-busy', busy);
     };
     markBusy(true);
     try { return await fn(); }
@@ -302,6 +304,7 @@ import { doQuickRedirect } from './features/redirect';
       // tidak aktif). Menunggu terlalu pendek membuat baris yang SUDAH muncul dilaporkan gagal.
       { timeout: 4000, interval: 15 }
     );
+    if (grew) await sleep(80);
     // Klik != berhasil: bila baris belum terkonfirmasi muncul, jangan dilaporkan sukses
     // (dulu caller tetap menghitung "ditambahkan" dan menomori baris yang salah).
     return grew ? addBtn : null;
@@ -470,20 +473,64 @@ import { doQuickRedirect } from './features/redirect';
   }
 
   // ---------- Toast (non-blocking, pengganti alert) ----------
-  function toast(msg, ms = 3500) {
+  type ToastKind = 'info' | 'warn' | 'error';
+  type ToastElement = HTMLDivElement & { _hideTimer?: ReturnType<typeof setTimeout>; _removeTimer?: ReturnType<typeof setTimeout> };
+  const TOAST_ICON: Record<ToastKind, string> = {
+    info: '✓',
+    warn: '!',
+    error: '✕'
+  };
+
+  function dismissToast(t: ToastElement) {
+    clearTimeout(t._hideTimer);
+    clearTimeout(t._removeTimer);
+    t.classList.add('is-leaving');
+    const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) {
+      t.remove();
+      return;
+    }
+    t._removeTimer = setTimeout(() => t.remove(), 150);
+  }
+
+  function toast(msg: string, ms = 3500, kind?: ToastKind) {
     injectStyles();
-    let t = byId<HTMLDivElement & { _hideTimer?: ReturnType<typeof setTimeout> }>('gabunganToast');
+    let t = byId<ToastElement>('gabunganToast');
     if (!t) {
-      t = document.createElement('div');
+      t = document.createElement('div') as ToastElement;
       t.id = 'gabunganToast';
+      t.setAttribute('role', 'status');
+      t.setAttribute('aria-live', 'polite');
       document.body.appendChild(t);
     }
-    t.textContent = msg;
-    // Aksen kiri: hijau untuk info/sukses, kuning untuk hal yang perlu dicek.
-    const warn = /Tunggu|gagal [1-9]|ditolak|tidak valid|Tidak ada|Terkunci|kembali berubah|dibatalkan|melebihi|bukan angka|belum/i.test(msg);
-    t.style.borderLeftColor = warn ? '#f59e0b' : '#22c55e';
     clearTimeout(t._hideTimer);
-    t._hideTimer = setTimeout(() => t.remove(), ms);
+    clearTimeout(t._removeTimer);
+    t.classList.remove('is-leaving', 'g-toast-info', 'g-toast-warn', 'g-toast-error');
+
+    // Deteksi regex sebagai fallback jika `kind` tidak diberikan.
+    const warn = /Tunggu|gagal [1-9]|ditolak|tidak valid|Tidak ada|Terkunci|kembali berubah|dibatalkan|melebihi|bukan angka|belum/i.test(msg);
+    const resolvedKind: ToastKind = kind || (warn ? 'warn' : 'info');
+    t.classList.add(`g-toast-${resolvedKind}`);
+
+    t.innerHTML = '';
+    const iconEl = document.createElement('span');
+    iconEl.className = 'g-toast-icon';
+    iconEl.setAttribute('aria-hidden', 'true');
+    iconEl.textContent = TOAST_ICON[resolvedKind];
+
+    const bodyEl = document.createElement('span');
+    bodyEl.className = 'g-toast-msg';
+    bodyEl.textContent = msg;
+
+    const closeEl = document.createElement('button');
+    closeEl.type = 'button';
+    closeEl.className = 'g-toast-close';
+    closeEl.setAttribute('aria-label', 'Tutup notifikasi');
+    closeEl.textContent = '×';
+    closeEl.onclick = () => dismissToast(t);
+
+    t.append(iconEl, bodyEl, closeEl);
+    t._hideTimer = setTimeout(() => dismissToast(t), ms);
   }
 
   // ---------- Apply Harga ----------
@@ -642,56 +689,383 @@ import { doQuickRedirect } from './features/redirect';
     dismissed: false
   };
 
+  type AutoRevisiState = {
+    stage: 'detail' | 'add';
+    docId: string;
+    count?: number;
+    expiresAt: number;
+  };
+  const AUTO_REVISI_KEY = 'appslog_auto_revisi_v1';
+
+  function readAutoRevisi(): AutoRevisiState | null {
+    try {
+      const raw = localStorage.getItem(AUTO_REVISI_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as AutoRevisiState;
+      if (!parsed || typeof parsed.expiresAt !== 'number' || Date.now() > parsed.expiresAt) {
+        localStorage.removeItem(AUTO_REVISI_KEY);
+        return null;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeAutoRevisi(next: AutoRevisiState | null) {
+    try {
+      if (!next) localStorage.removeItem(AUTO_REVISI_KEY);
+      else localStorage.setItem(AUTO_REVISI_KEY, JSON.stringify(next));
+    } catch (e) { /* abaikan error storage */ }
+  }
+
+  function countSummaryCategoryRows(): number {
+    const tables = Array.from(queryAll('table')).filter(t => t.offsetParent !== null);
+    let targetTable: ScriptElement | null = null;
+    for (const table of tables) {
+      const headerText = normalizeText(
+        Array.from(table.querySelectorAll('thead th, tr:first-child th')).map(th => th.textContent || '').join(' ')
+      ).toLowerCase();
+      const hasMaterialCols = headerText.includes('material') && headerText.includes('pricebook');
+      let nearSummaryHeading = false;
+      let el: HTMLElement | null = table.parentElement;
+      for (let hop = 0; hop < 6 && el; hop++) {
+        const txt = normalizeText(el.innerText || el.textContent || '').toLowerCase();
+        if (txt.includes('summary category')) { nearSummaryHeading = true; break; }
+        el = el.parentElement;
+      }
+      if (hasMaterialCols || nearSummaryHeading) {
+        targetTable = table;
+        if (hasMaterialCols && nearSummaryHeading) break;
+      }
+    }
+    if (!targetTable) return 0;
+    return Array.from(targetTable.querySelectorAll('tbody tr')).filter(tr => {
+      if ((tr as HTMLElement).offsetParent === null) return false;
+      const text = normalizeText(tr.textContent || '');
+      return !!text && !/^total\b/i.test(text);
+    }).length;
+  }
+
+  function findRevisiButton(): ScriptElement | null {
+    const els = Array.from(queryAll("button, a, [role='button']"))
+      .filter(el => el.offsetParent !== null && !el.disabled);
+    return els.find(el => /^revisi transaksi$/i.test(normalizeText(el.innerText || el.textContent))) || null;
+  }
+
+  let autoRevisiRunning = false;
+  let autoRevisiCancelled = false;
+
+  function setAutoBar(text: string | null) {
+    const bar = byId('gabunganAutoBar');
+    const txt = byId('gabunganAutoText');
+    if (!bar || !txt) return;
+    if (!text) {
+      bar.hidden = true;
+      txt.textContent = '';
+    } else {
+      txt.textContent = text;
+      bar.hidden = false;
+    }
+  }
+
+  function cancelAutoRevisi() {
+    autoRevisiCancelled = true;
+    writeAutoRevisi(null);
+    setAutoBar(null);
+    toast('Auto-revisi dibatalkan.', 3000, 'warn');
+  }
+
+  function switchPanelIfMounted(which: 'Redirect' | 'Material' | 'Harga') {
+    state.panel = which;
+    const modal = getModal();
+    if (!modal) return;
+    ['Redirect', 'Material', 'Harga'].forEach(p => {
+      const panel = byId('panel' + p);
+      if (panel) panel.hidden = p !== which;
+      const tab = byId('tab' + p);
+      if (tab) {
+        const active = p === which;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      }
+    });
+    const note = byId('gabunganNote');
+    const NOTE: Record<string, string> = {
+      Redirect: 'Tempel tanggal + nomor (dari Excel pun boleh). Enter = Auto Revisi.',
+      Material: 'Format: Tipe Panjang Grade Diameter PCS [Harga] — satu baris per item',
+      Harga: 'Satu angka per baris. Pemisah ribuan (1.234.567 / 1,234,567) dikenali.'
+    };
+    if (note) note.textContent = NOTE[which] || '';
+  }
+
+  function isMaterialContext(): boolean {
+    const href = location.href;
+    return /\/transaction\/add\b/i.test(href)
+      || !!findAddButton()
+      || queryAll("input[name='materialId']").length > 0;
+  }
+
+  function isHargaContext(): boolean {
+    return queryAll("input[name^='adjustment_price' i]").length > 0;
+  }
+
+  let lastContextKey = '';
+  function syncContextTab() {
+    const isMat = isMaterialContext();
+    const isHrg = !isMat && isHargaContext();
+    const tabMat = byId<HTMLButtonElement>('tabMaterial');
+    const tabHrg = byId<HTMLButtonElement>('tabHarga');
+    if (tabMat) tabMat.disabled = !isMat;
+    if (tabHrg) tabHrg.disabled = !isHrg;
+
+    const contextKey = `${location.href}|${isMat ? 'M' : isHrg ? 'H' : 'R'}`;
+    if (contextKey === lastContextKey) return;
+    lastContextKey = contextKey;
+    if (isMat) switchPanelIfMounted('Material');
+    else if (isHrg) switchPanelIfMounted('Harga');
+    else switchPanelIfMounted('Redirect');
+  }
+
+  async function processAutoRevisi() {
+    if (autoRevisiRunning) return;
+    const pending = readAutoRevisi();
+    if (!pending) {
+      setAutoBar(null);
+      return;
+    }
+
+    const href = location.href;
+    if (pending.stage === 'detail') {
+      if (!/\/detail\b/i.test(href)) {
+        setAutoBar(`Menunggu /detail (${pending.docId})…`);
+        return;
+      }
+      const pathId = adjustIdForPath(pending.docId);
+      if (pending.docId && !href.includes(pending.docId) && !href.includes(pathId)) return;
+
+      autoRevisiRunning = true;
+      autoRevisiCancelled = false;
+      setAutoBar('Menghitung SUMMARY CATEGORY…');
+      try {
+        const ready = await waitFor(
+          () => autoRevisiCancelled || (countSummaryCategoryRows() > 0 && !!findRevisiButton()),
+          { timeout: 15000, interval: 150 }
+        );
+        if (autoRevisiCancelled) return;
+        if (!ready) {
+          writeAutoRevisi(null);
+          setAutoBar(null);
+          toast('Auto-revisi: tabel SUMMARY CATEGORY atau tombol Revisi Transaksi tidak ditemukan.', 6000, 'warn');
+          return;
+        }
+        const count = countSummaryCategoryRows();
+        const revisiBtn = findRevisiButton();
+        if (count <= 0 || !revisiBtn) {
+          writeAutoRevisi(null);
+          setAutoBar(null);
+          toast('Auto-revisi: jumlah baris SUMMARY CATEGORY kosong.', 5000, 'warn');
+          return;
+        }
+        writeAutoRevisi({
+          stage: 'add',
+          docId: pending.docId,
+          count,
+          expiresAt: Date.now() + 120000
+        });
+        setAutoBar(`Membuka Revisi Transaksi (${count} baris)…`);
+        revisiBtn.click();
+      } finally {
+        autoRevisiRunning = false;
+      }
+    } else if (pending.stage === 'add') {
+      if (!/\/transaction\/add\b/i.test(href)) {
+        setAutoBar(`Membuka halaman revisi (${pending.count || 0} baris)…`);
+        return;
+      }
+      autoRevisiRunning = true;
+      autoRevisiCancelled = false;
+      setAutoBar(`Menunggu halaman revisi siap (${pending.count || 0} baris)…`);
+      try {
+        const isPageReady = () => {
+          if (autoRevisiCancelled) return true;
+          if (!findAddButton()) return false;
+          // Pastikan form sudah selesai hydrate (tidak ada spinner/loading utama yang masih aktif).
+          const loading = queryOne("[role='progressbar'], [aria-busy='true']:not(#gabunganModal button)");
+          return !loading;
+        };
+        const ready = await waitFor(isPageReady, { timeout: 15000, interval: 150 });
+        writeAutoRevisi(null);
+        if (autoRevisiCancelled) return;
+        if (!ready) {
+          setAutoBar(null);
+          toast('Auto-revisi: tombol "+ Tambah Tipe Material" tidak muncul.', 6000, 'warn');
+          return;
+        }
+        // Jeda stabilisasi singkat agar fetch/hydrate React tidak me-reset baris yang baru ditambah.
+        await sleep(500);
+        if (autoRevisiCancelled) return;
+
+        const targetCount = pending.count || 0;
+        for (let pass = 0; pass < 2; pass++) {
+          const existing = queryAll("input[name='materialId']").length;
+          const toAdd = Math.max(0, targetCount - existing);
+          if (toAdd === 0) break;
+          setAutoBar(`Menambahkan ${toAdd} baris…`);
+          await runExclusive('Auto Tambah Baris', () => tambahBarisOtomatis(toAdd), 'btnApplyTambah');
+          await sleep(250);
+          if (autoRevisiCancelled) return;
+        }
+        const finalCount = queryAll("input[name='materialId']").length;
+        if (targetCount > 0 && finalCount < targetCount) {
+          toast(`Auto-revisi selesai: ${finalCount} dari ${targetCount} baris tersedia di form.`, 6000, 'warn');
+        }
+        setAutoBar(null);
+        switchPanelIfMounted('Material');
+      } finally {
+        autoRevisiRunning = false;
+        if (!readAutoRevisi()) setAutoBar(null);
+      }
+    }
+  }
+
     // Tema "slate" gelap ringkas. Semua gaya di-scope lewat id agar tidak bocor ke halaman.
     const STYLE = `
+  #gabunganModal, #gabunganToast, #gabunganOpenBtn {
+    --g-bg: #0f172a;
+    --g-bg-deep: #0b1220;
+    --g-surface: #111c2e;
+    --g-surface-hover: #16233a;
+    --g-border: #1e293b;
+    --g-border-hover: #334155;
+    --g-text: #e2e8f0;
+    --g-text-soft: #cbd5e1;
+    --g-text-muted: #94a3b8;
+    --g-text-faint: #64748b;
+    --g-placeholder: #475569;
+    --g-accent: #22c55e;
+    --g-accent-text: #4ade80;
+    --g-accent-soft: rgba(34,197,94,.14);
+    --g-accent-subtle: rgba(34,197,94,.12);
+    --g-accent-ring: rgba(34,197,94,.16);
+    --g-accent-badge: rgba(34,197,94,.18);
+    --g-accent-hover: rgba(34,197,94,.22);
+    --g-accent-border: rgba(34,197,94,.32);
+    --g-accent-border-soft: rgba(34,197,94,.28);
+    --g-accent-focus: rgba(34,197,94,.5);
+    --g-accent-focus-ring: rgba(34,197,94,.1);
+    --g-warn: #f59e0b;
+    --g-error: #ef4444;
+    --g-shadow: rgba(2,6,23,.5);
+    --g-shadow-btn: rgba(2,6,23,.45);
+  }
   #gabunganModal, #gabunganModal * { box-sizing: border-box; }
-  #gabunganModal { background:#0f172a; color:#e2e8f0; border:1px solid #1e293b; border-radius:12px; overflow:hidden;
+  #gabunganModal [hidden] { display: none !important; }
+  #gabunganModal { background:var(--g-bg); color:var(--g-text); border:1px solid var(--g-border); border-radius:12px; overflow:hidden;
+    box-shadow:0 18px 44px var(--g-shadow);
     font:12px/1.45 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
-  #gabunganHeader { display:flex; align-items:center; gap:8px; height:32px; padding:0 6px 0 10px;
-    background:#0b1220; border-bottom:1px solid #1e293b; cursor:move; user-select:none; }
-  #gabunganModal .g-dot { width:6px; height:6px; border-radius:50%; background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.16); flex:none; }
-  #gabunganModal .g-title { flex:1; font-size:10px; font-weight:700; letter-spacing:1.4px; color:#94a3b8; }
-  #gabunganModal .g-kbd { font:10px/1 ui-monospace,Consolas,monospace; color:#64748b; border:1px solid #1e293b; border-radius:4px; padding:3px 5px; }
-  #gabunganModal .g-icon { width:22px; height:22px; border:1px solid transparent; border-radius:6px; background:transparent;
-    color:#94a3b8; font-size:13px; line-height:1; cursor:pointer; }
-  #gabunganModal .g-icon:hover { background:#1e293b; color:#e2e8f0; }
-  #gabunganModal .g-tabs { display:flex; gap:4px; padding:8px; background:#0b1220; border-bottom:1px solid #1e293b; }
-  #gabunganModal .tab { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:5px; height:26px;
-    padding:0 4px; border:1px solid transparent; border-radius:7px; background:transparent; color:#64748b;
-    font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
-  #gabunganModal .tab:hover { color:#cbd5e1; background:#16233a; }
-  #gabunganModal .tab.active { color:#4ade80; background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.28); }
-  #gabunganModal .g-badge { display:none; min-width:14px; padding:0 4px; border-radius:999px; background:rgba(34,197,94,.18);
-    color:#4ade80; font-size:9px; line-height:14px; text-align:center; }
+  #gabunganHeader { display:flex; align-items:center; gap:8px; height:36px; padding:0 6px 0 10px;
+    background:var(--g-bg-deep); border-bottom:1px solid var(--g-border); cursor:move; user-select:none; }
+  #gabunganModal .g-dot { width:6px; height:6px; border-radius:50%; background:var(--g-accent); box-shadow:0 0 0 3px var(--g-accent-ring); flex:none; }
+  #gabunganModal .g-dot.is-busy { background:var(--g-warn); }
+  #gabunganModal .g-title { flex:1; font-size:11px; font-weight:700; letter-spacing:1.4px; color:var(--g-text-muted); }
+  #gabunganModal .g-kbd { font:11px/1 ui-monospace,Consolas,monospace; color:var(--g-text-faint); border:1px solid var(--g-border); border-radius:4px; padding:3px 5px; }
+  #gabunganModal .g-icon { width:26px; height:26px; border:1px solid transparent; border-radius:6px; background:transparent;
+    color:var(--g-text-muted); font-size:13px; line-height:1; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;
+    transition:background 140ms ease, color 140ms ease, border-color 140ms ease; }
+  #gabunganModal .g-icon:hover { background:var(--g-border); color:var(--g-text); }
+  #gabunganModal .g-tabs { display:flex; gap:4px; padding:8px; background:var(--g-bg-deep); border-bottom:1px solid var(--g-border); overflow:hidden; }
+  #gabunganModal .tab { flex:1; min-width:0; display:inline-flex; align-items:center; justify-content:center; gap:5px; height:28px;
+    padding:0 4px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--g-text-faint);
+    font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap;
+    transition:background 140ms ease, color 140ms ease, border-color 140ms ease; }
+  #gabunganModal .tab:hover:not(:disabled) { color:var(--g-text-soft); background:var(--g-surface-hover); }
+  #gabunganModal .tab.active { color:var(--g-accent-text); background:var(--g-accent-subtle); border-color:var(--g-accent-border-soft); }
+  #gabunganModal .tab:disabled { opacity:0.38; cursor:not-allowed; }
+  #gabunganModal .g-badge { display:inline-block; min-width:15px; padding:0 4px; border-radius:999px; background:var(--g-accent-badge);
+    color:var(--g-accent-text); font-size:10px; line-height:15px; text-align:center; }
   #gabunganModal #gabunganContent { padding:10px 10px 0; }
-  #gabunganModal textarea, #gabunganModal input[type='number'], #gabunganModal input[type='text'] { width:100%; display:block; background:#0b1220;
-    color:#e2e8f0; border:1px solid #1e293b; border-radius:8px; padding:8px;
+  #gabunganModal #gabunganContent > [role="tabpanel"]:not([hidden]) { animation:gPanelIn 140ms ease; }
+  #gabunganModal textarea, #gabunganModal input[type='number'], #gabunganModal input[type='text'] { width:100%; display:block; background:var(--g-bg-deep);
+    color:var(--g-text); border:1px solid var(--g-border); border-radius:8px; padding:8px;
     font:12px/1.5 ui-monospace,Consolas,monospace; outline:none; }
   #gabunganModal textarea { height:110px; resize:vertical; }
   /* Field satu baris (Tambah Baris & Redirect) tingginya seragam 32px.
      Ubah angka 32px di bawah bila ingin keduanya lebih tinggi/pendek. */
   #gabunganModal input[type='number'], #gabunganModal input[type='text'] { height:32px; padding:6px 8px; }
-  #gabunganModal textarea::placeholder, #gabunganModal input::placeholder { color:#475569; }
+  #gabunganModal textarea::placeholder, #gabunganModal input::placeholder { color:var(--g-placeholder); }
   #gabunganModal textarea:focus, #gabunganModal input[type='number']:focus, #gabunganModal input[type='text']:focus {
-    border-color:rgba(34,197,94,.5); box-shadow:0 0 0 3px rgba(34,197,94,.1); }
-  #gabunganModal .g-actions { display:flex; gap:6px; margin-top:8px; }
-  #gabunganModal .g-primary { flex:1; height:30px; border:1px solid rgba(34,197,94,.32); border-radius:7px;
-    background:rgba(34,197,94,.14); color:#4ade80; font-size:12px; font-weight:700; cursor:pointer; }
-  #gabunganModal .g-primary:hover { background:rgba(34,197,94,.22); }
-  #gabunganModal .g-ghost { height:30px; padding:0 10px; border:1px solid #1e293b; border-radius:7px;
-    background:transparent; color:#94a3b8; font-size:11px; cursor:pointer; }
-  #gabunganModal .g-ghost:hover { border-color:#334155; color:#e2e8f0; }
+    border-color:var(--g-accent-focus); box-shadow:0 0 0 3px var(--g-accent-focus-ring); }
+  #gabunganModal .g-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  #gabunganModal #panelRedirect .g-actions > button { flex:1; padding:0 6px; white-space:nowrap; }
+  #gabunganModal .g-inline-add { display:flex; gap:6px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--g-border); }
+  #gabunganModal .g-inline-add input { flex:1; min-width:0; height:28px; padding:4px 8px; }
+  #gabunganModal .g-inline-add .g-ghost { height:28px; white-space:nowrap; }
+  #gabunganModal #gabunganAutoBar { display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin:8px 10px 0; padding:6px 8px; border:1px solid var(--g-accent-border); border-radius:8px;
+    background:var(--g-accent-subtle); color:var(--g-accent-text); font-size:11px; }
+  #gabunganModal #gabunganAutoText { flex:1; min-width:0; }
+  #gabunganModal #btnCancelAuto { height:24px; padding:0 8px; font-size:11px; }
+  #gabunganModal .g-primary { flex:1; height:30px; border:1px solid var(--g-accent-border); border-radius:7px;
+    background:var(--g-accent-soft); color:var(--g-accent-text); font-size:12px; font-weight:700; cursor:pointer;
+    transition:background 140ms ease, color 140ms ease, border-color 140ms ease; }
+  #gabunganModal .g-primary:hover { background:var(--g-accent-hover); }
+  #gabunganModal .g-ghost { height:30px; padding:0 10px; border:1px solid var(--g-border); border-radius:7px;
+    background:transparent; color:var(--g-text-muted); font-size:11px; cursor:pointer;
+    transition:background 140ms ease, color 140ms ease, border-color 140ms ease; }
+  #gabunganModal .g-ghost:hover { border-color:var(--g-border-hover); color:var(--g-text); }
   #gabunganModal button[aria-busy='true'] { cursor:progress; }
-  #gabunganNote { padding:8px 12px 10px; font-size:11px; color:#64748b; min-height:28px; }
+  #gabunganModal button.is-busy { opacity:0.75; }
+  #gabunganModal button.is-busy::before { content:''; display:inline-block; width:11px; height:11px; margin-right:6px;
+    border:2px solid currentColor; border-top-color:transparent; border-radius:50%; vertical-align:-1px;
+    animation:gSpin 650ms linear infinite; }
+  #gabunganModal .tab:focus-visible, #gabunganModal .g-primary:focus-visible, #gabunganModal .g-ghost:focus-visible,
+  #gabunganModal .g-icon:focus-visible, #gabunganOpenBtn:focus-visible, #gabunganToast .g-toast-close:focus-visible {
+    outline:2px solid var(--g-accent); outline-offset:2px; }
+  #gabunganNote { padding:8px 12px 10px; font-size:11px; color:var(--g-text-faint); min-height:28px; }
   #gabunganOpenBtn { position:fixed; left:16px; bottom:16px; z-index:9999; width:36px; height:36px;
-    display:inline-flex; align-items:center; justify-content:center; border:1px solid #1e293b; border-radius:50%;
-    background:#111c2e; color:#cbd5e1; box-shadow:0 6px 18px rgba(2,6,23,.45); cursor:pointer; }
-  #gabunganOpenBtn:hover { border-color:rgba(34,197,94,.5); color:#4ade80; }
-  #gabunganToast { position:fixed; right:16px; bottom:16px; z-index:10002; max-width:380px; padding:9px 12px;
-    border:1px solid #1e293b; border-left:3px solid #22c55e; border-radius:10px; background:#0b1220; color:#e2e8f0;
-    box-shadow:0 10px 26px rgba(2,6,23,.5); white-space:pre-line;
-    font:12px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+    display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--g-border); border-radius:50%;
+    background:var(--g-surface); color:var(--g-text-soft); box-shadow:0 6px 18px var(--g-shadow-btn); cursor:pointer;
+    transition:background 140ms ease, color 140ms ease, border-color 140ms ease; }
+  #gabunganOpenBtn:hover { border-color:var(--g-accent-focus); color:var(--g-accent-text); }
+  #gabunganToast { position:fixed; right:16px; bottom:16px; z-index:10002; max-width:380px; padding:9px 10px 9px 12px;
+    display:flex; align-items:flex-start; gap:8px;
+    border:1px solid var(--g-border); border-left:3px solid var(--g-accent); border-radius:10px; background:var(--g-bg-deep); color:var(--g-text);
+    box-shadow:0 10px 26px var(--g-shadow);
+    font:12px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    animation:gToastIn 150ms ease; }
+  #gabunganToast.g-toast-info { border-left-color:var(--g-accent); }
+  #gabunganToast.g-toast-warn { border-left-color:var(--g-warn); }
+  #gabunganToast.g-toast-error { border-left-color:var(--g-error); }
+  #gabunganToast.is-leaving { opacity:0; transform:translateY(4px); transition:opacity 140ms ease, transform 140ms ease; }
+  #gabunganToast .g-toast-icon { flex:none; font-weight:700; line-height:1.5; }
+  #gabunganToast.g-toast-info .g-toast-icon { color:var(--g-accent); }
+  #gabunganToast.g-toast-warn .g-toast-icon { color:var(--g-warn); }
+  #gabunganToast.g-toast-error .g-toast-icon { color:var(--g-error); }
+  #gabunganToast .g-toast-msg { flex:1; min-width:0; white-space:pre-line; }
+  #gabunganToast .g-toast-close { flex:none; width:20px; height:20px; border:none; border-radius:4px; background:transparent;
+    color:var(--g-text-muted); font-size:14px; line-height:1; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
+  #gabunganToast .g-toast-close:hover { background:var(--g-border); color:var(--g-text); }
+  @keyframes gPanelIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+  @keyframes gToastIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+  @keyframes gSpin { to { transform:rotate(360deg); } }
+  @media (max-width: 420px) {
+    #gabunganModal .g-tab-label { display:none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #gabunganModal .tab, #gabunganModal .g-primary, #gabunganModal .g-ghost, #gabunganModal .g-icon, #gabunganOpenBtn,
+    #gabunganModal #gabunganContent > [role="tabpanel"]:not([hidden]), #gabunganModal button.is-busy::before,
+    #gabunganToast, #gabunganToast.is-leaving { transition:none; animation:none; }
+  }
     `;
+
+    const ICON = {
+      arrow: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="M13 6l6 6-6 6"/></svg>',
+      plus: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+      list: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>',
+      tag: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12l-8 8-8-8V4h8z"/><circle cx="8" cy="8" r="1.4"/></svg>',
+      sliders: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg>'
+    };
 
     function injectStyles() {
       if (document.getElementById('gabunganStyles')) return;
@@ -725,69 +1099,67 @@ import { doQuickRedirect } from './features/redirect';
     injectStyles();
     modal.style.cssText =
       'position:fixed; bottom:20px; left:20px; transform:none; width:400px; max-width:92vw;' +
-      ' z-index:10000; box-shadow:0 18px 44px rgba(2,6,23,.5);';
+      ' z-index:10000;';
 
     modal.innerHTML = `
       <div id="gabunganHeader">
         <span id="gabunganStatusDot" class="g-dot"></span>
         <span class="g-title">TOOLS</span>
         <span class="g-kbd">F8</span>
-        <button id="btnCloseModal" class="g-icon" title="Tutup (Esc)" aria-label="Tutup">&times;</button>
+        <button id="btnCloseModal" type="button" class="g-icon" title="Tutup (Esc)" aria-label="Tutup">&times;</button>
       </div>
 
-      <div class="g-tabs">
-        <button id="tabRedirect" class="tab" title="Quick Redirect">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="M13 6l6 6-6 6"/></svg>
-          Redirect<span class="g-badge" id="badgeRedirect"></span>
+      <div class="g-tabs" role="tablist">
+        <button id="tabRedirect" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panelRedirect" title="Quick Redirect" aria-label="Redirect">
+          ${ICON.arrow}
+          <span class="g-tab-label">Redirect</span><span class="g-badge" id="badgeRedirect" hidden></span>
         </button>
-        <button id="tabTambah" class="tab" title="Tambah baris">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-          Baris<span class="g-badge" id="badgeTambah"></span>
+        <button id="tabMaterial" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panelMaterial" title="Paste material" aria-label="Material">
+          ${ICON.list}
+          <span class="g-tab-label">Material</span><span class="g-badge" id="badgeMaterial" hidden></span>
         </button>
-        <button id="tabMaterial" class="tab" title="Paste material">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
-          Material<span class="g-badge" id="badgeMaterial"></span>
-        </button>
-        <button id="tabHarga" class="tab" title="Paste harga">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12l-8 8-8-8V4h8z"/><circle cx="8" cy="8" r="1.4"/></svg>
-          Harga<span class="g-badge" id="badgeHarga"></span>
+        <button id="tabHarga" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panelHarga" title="Paste harga" aria-label="Harga">
+          ${ICON.tag}
+          <span class="g-tab-label">Harga</span><span class="g-badge" id="badgeHarga" hidden></span>
         </button>
       </div>
 
       <div id="gabunganContent">
-        <div id="panelRedirect">
+        <div id="panelRedirect" role="tabpanel" aria-labelledby="tabRedirect">
           <input id="inputRedirect" type="text" placeholder="24-Nov-26 261124019" spellcheck="false" autocomplete="off">
           <div class="g-actions">
-            <button id="btnGoRedirect" class="g-primary">Go</button>
-            <button id="btnNewTabRedirect" class="g-ghost">New tab</button>
-            <button id="btnClearRedirect" class="g-ghost">Clear</button>
+            <button id="btnGoRedirect" type="button" class="g-primary">Auto Revisi</button>
+            <button id="btnOpenOnlyRedirect" type="button" class="g-ghost">Buka Saja</button>
+            <button id="btnNewTabRedirect" type="button" class="g-ghost">New tab</button>
+            <button id="btnClearRedirect" type="button" class="g-ghost">Clear</button>
           </div>
         </div>
 
-        <div id="panelTambah" style="display:none;">
-          <input id="inputJumlahBaris" type="number" min="1" placeholder="Jumlah baris yang ditambahkan...">
-          <div class="g-actions">
-            <button id="btnApplyTambah" class="g-primary">Tambah Baris</button>
-            <button id="btnClearTambah" class="g-ghost">Clear</button>
+        <div id="panelMaterial" role="tabpanel" aria-labelledby="tabMaterial" hidden>
+          <div class="g-inline-add">
+            <input id="inputJumlahBaris" type="number" min="1" placeholder="Tambah baris manual...">
+            <button id="btnApplyTambah" type="button" class="g-ghost">+ Tambah Baris</button>
           </div>
-        </div>
-
-        <div id="panelMaterial" style="display:none;">
           <textarea id="textareaMaterial" placeholder="Tipe Panjang Grade Diameter PCS [Harga]&#10;Sebaiknya paste langsung dari Excel (antar kolom berupa TAB)"></textarea>
           <div class="g-actions">
-            <button id="btnApplyMaterial" class="g-primary">Apply Material</button>
-            <button id="btnClearMaterial" class="g-ghost">Clear</button>
+            <button id="btnApplyMaterial" type="button" class="g-primary">Apply Material</button>
+            <button id="btnClearMaterial" type="button" class="g-ghost">Clear</button>
           </div>
         </div>
 
-        <div id="panelHarga" style="display:none;">
+        <div id="panelHarga" role="tabpanel" aria-labelledby="tabHarga" hidden>
           <textarea id="textareaHarga" placeholder="Satu angka per baris&#10;Contoh: 850000 atau 1.234.567"></textarea>
           <div class="g-actions">
-            <button id="btnApplyHarga" class="g-primary">Apply Harga</button>
-            <button id="btnClearHarga" class="g-ghost">Clear</button>
+            <button id="btnApplyHarga" type="button" class="g-primary">Apply Harga</button>
+            <button id="btnClearHarga" type="button" class="g-ghost">Clear</button>
           </div>
         </div>
 
+      </div>
+
+      <div id="gabunganAutoBar" hidden>
+        <span id="gabunganAutoText"></span>
+        <button id="btnCancelAuto" type="button" class="g-ghost">Batal</button>
       </div>
 
       <div id="gabunganNote"></div>
@@ -808,30 +1180,29 @@ import { doQuickRedirect } from './features/redirect';
     if (!document.getElementById('gabunganOpenBtn')) {
       const openBtn = document.createElement('button');
       openBtn.id = 'gabunganOpenBtn';
+      openBtn.type = 'button';
       openBtn.title = 'Tools (F8)';
       openBtn.setAttribute('aria-label', 'Tools (F8)');
-      openBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg>';
+      openBtn.innerHTML = ICON.sliders;
       openBtn.onclick = showModal;
       document.body.appendChild(openBtn);
     }
 
     // tab handlers
     const tabRedirect = document.getElementById('tabRedirect');
-    const tabTambah = document.getElementById('tabTambah');
     const tabMaterial = document.getElementById('tabMaterial');
     const tabHarga = document.getElementById('tabHarga');
     const note = document.getElementById('gabunganNote');
 
     const NOTE = {
-      Redirect: 'Tempel tanggal + nomor (dari Excel pun boleh). Enter = Go.',
-      Tambah: 'Masukkan jumlah baris yang akan ditambahkan.',
+      Redirect: 'Tempel tanggal + nomor (dari Excel pun boleh). Enter = Auto Revisi.',
       Material: 'Format: Tipe Panjang Grade Diameter PCS [Harga] — satu baris per item',
       Harga: 'Satu angka per baris. Pemisah ribuan (1.234.567 / 1,234,567) dikenali.'
     };
-    const PANELS = ['Redirect', 'Tambah', 'Material', 'Harga'];
-    // Badge = jumlah baris siap kirim (tab Baris = jumlah yang diketik).
-    const BADGES = { Redirect: 'badgeRedirect', Tambah: 'badgeTambah', Material: 'badgeMaterial', Harga: 'badgeHarga' };
-    const BADGE_INPUT = { Redirect: 'inputRedirect', Tambah: 'inputJumlahBaris', Material: 'textareaMaterial', Harga: 'textareaHarga' };
+    const PANELS = ['Redirect', 'Material', 'Harga'];
+    // Badge = jumlah baris siap kirim.
+    const BADGES = { Redirect: 'badgeRedirect', Material: 'badgeMaterial', Harga: 'badgeHarga' };
+    const BADGE_INPUT = { Redirect: 'inputRedirect', Material: 'textareaMaterial', Harga: 'textareaHarga' };
 
     function countLines(txt) { return String(txt || '').split(/\r?\n/).filter(s => s.trim()).length; }
     function refreshBadges() {
@@ -839,25 +1210,30 @@ import { doQuickRedirect } from './features/redirect';
         const badge = document.getElementById(BADGES[key]);
         const src = textControl(BADGE_INPUT[key]);
         if (!badge || !src) return;
-        const n = key === 'Tambah' ? (parseInt(src.value, 10) || 0) : countLines(src.value);
+        const n = countLines(src.value);
         badge.textContent = n > 0 ? String(n) : '';
-        badge.style.display = n > 0 ? 'inline-block' : 'none';
+        badge.hidden = n <= 0;
       });
     }
 
     function showPanel(which) {
+      if (!PANELS.includes(which)) which = 'Redirect';
       PANELS.forEach(p => {
         const panel = document.getElementById('panel' + p);
-        if (panel) panel.style.display = p === which ? 'block' : 'none';
+        if (panel) panel.hidden = p !== which;
         const tab = document.getElementById('tab' + p);
-        if (tab) tab.classList.toggle('active', p === which);
+        if (tab) {
+          const active = p === which;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
       });
       note.textContent = NOTE[which] || '';
       refreshBadges();
     }
 
     // Ctrl/Cmd+Enter = tombol utama tab yang sedang aktif.
-    const PRIMARY = { Redirect: 'btnGoRedirect', Tambah: 'btnApplyTambah', Material: 'btnApplyMaterial', Harga: 'btnApplyHarga' };
+    const PRIMARY = { Redirect: 'btnGoRedirect', Material: 'btnApplyMaterial', Harga: 'btnApplyHarga' };
     modal.tabIndex = -1;
     modal.addEventListener('keydown', e => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -869,7 +1245,6 @@ import { doQuickRedirect } from './features/redirect';
     modal.addEventListener('click', () => setTimeout(refreshBadges, 0));
 
     tabRedirect.onclick = () => showPanel('Redirect');
-    tabTambah.onclick = () => showPanel('Tambah');
     tabMaterial.onclick = () => showPanel('Material');
     tabHarga.onclick = () => showPanel('Harga');
 
@@ -889,7 +1264,7 @@ import { doQuickRedirect } from './features/redirect';
     });
     queryAll('.tab', modal).forEach(t => {
       t.addEventListener('click', () => {
-        state.panel = { tabRedirect: 'Redirect', tabTambah: 'Tambah', tabMaterial: 'Material', tabHarga: 'Harga' }[t.id];
+        state.panel = { tabRedirect: 'Redirect', tabMaterial: 'Material', tabHarga: 'Harga' }[t.id] || 'Redirect';
       });
     });
 
@@ -916,17 +1291,49 @@ import { doQuickRedirect } from './features/redirect';
       }
     });
 
+    function startAutoRevisiFor(raw: string) {
+      const { id } = parseRedirectParts(raw);
+      autoRevisiCancelled = false;
+      writeAutoRevisi({
+        stage: 'detail',
+        docId: id,
+        expiresAt: Date.now() + 120000
+      });
+      setAutoBar(`Menunggu /detail (${id})…`);
+    }
+
+    const cancelAutoBtn = byId('btnCancelAuto');
+    if (cancelAutoBtn) cancelAutoBtn.onclick = cancelAutoRevisi;
+
     document.getElementById('btnGoRedirect').onclick = async () => {
       const el = redirectInput;
       const txt = el.value.trim();
       if (!txt) return toast('Isi tanggal dan nomor.\nContoh: 24-Nov-26 261124019');
       try {
-        await runExclusive('Quick Redirect', () => {
+        await runExclusive('Auto Revisi', () => {
+          startAutoRevisiFor(txt);
           doQuickRedirect(txt, false);
           el.value = ''; state.redirect = '';
-        });
+        }, 'btnGoRedirect');
       } catch (err) {
-        toast(err.message || String(err), 8000);
+        writeAutoRevisi(null);
+        setAutoBar(null);
+        toast(err.message || String(err), 8000, 'error');
+      }
+    };
+    document.getElementById('btnOpenOnlyRedirect').onclick = async () => {
+      const el = redirectInput;
+      const txt = el.value.trim();
+      if (!txt) return toast('Isi tanggal dan nomor.\nContoh: 24-Nov-26 261124019');
+      try {
+        await runExclusive('Buka Detail', () => {
+          writeAutoRevisi(null);
+          setAutoBar(null);
+          doQuickRedirect(txt, false);
+          el.value = ''; state.redirect = '';
+        }, 'btnOpenOnlyRedirect');
+      } catch (err) {
+        toast(err.message || String(err), 8000, 'error');
       }
     };
     document.getElementById('btnNewTabRedirect').onclick = () => {
@@ -934,9 +1341,11 @@ import { doQuickRedirect } from './features/redirect';
       const txt = el.value.trim();
       if (!txt) return toast('Isi tanggal dan nomor.\nContoh: 24-Nov-26 261124019');
       try {
+        writeAutoRevisi(null);
+        setAutoBar(null);
         doQuickRedirect(txt, true);
       } catch (err) {
-        toast(err.message || String(err), 8000);
+        toast(err.message || String(err), 8000, 'error');
       }
     };
     document.getElementById('btnClearRedirect').onclick = () => {
@@ -949,16 +1358,13 @@ import { doQuickRedirect } from './features/redirect';
       if (jumlah <= 0) return toast('Isi jumlah baris dulu!');
       if (jumlah > 100 && !confirm(`Tambah ${jumlah} baris sekaligus. Lanjutkan?`)) return;
       el.value = ''; state.jumlah = '';
-      await runExclusive('Tambah Baris', () => tambahBarisOtomatis(jumlah));
-    };
-    document.getElementById('btnClearTambah').onclick = () => {
-      textControl('inputJumlahBaris').value = ''; state.jumlah = '';
+      await runExclusive('Tambah Baris', () => tambahBarisOtomatis(jumlah), 'btnApplyTambah');
     };
 
     document.getElementById('btnApplyMaterial').onclick = async () => {
       const raw = textControl('textareaMaterial').value;
       if (!raw.trim()) return toast('Paste data material dulu!');
-      await runExclusive('Paste Material', () => applyMaterial(raw));
+      await runExclusive('Paste Material', () => applyMaterial(raw), 'btnApplyMaterial');
     };
     document.getElementById('btnClearMaterial').onclick = () => {
       textControl('textareaMaterial').value = ''; state.material = '';
@@ -967,7 +1373,7 @@ import { doQuickRedirect } from './features/redirect';
     document.getElementById('btnApplyHarga').onclick = async () => {
       const raw = textControl('textareaHarga').value;
       if (!raw.trim()) return toast('Paste data harga dulu!');
-      await runExclusive('Paste Harga', () => applyHarga(raw));
+      await runExclusive('Paste Harga', () => applyHarga(raw), 'btnApplyHarga');
     };
     document.getElementById('btnClearHarga').onclick = () => {
       textControl('textareaHarga').value = ''; state.harga = '';
@@ -1029,6 +1435,8 @@ import { doQuickRedirect } from './features/redirect';
       const m = getModal();
       if (m) m.style.display = state.dismissed ? 'none' : 'block';
     }
+    syncContextTab();
+    void processAutoRevisi();
   }
 
   // Pantau DOM alih-alih polling 1 detik: lebih murah dan langsung pulih saat React
@@ -1048,8 +1456,16 @@ import { doQuickRedirect } from './features/redirect';
   if (document.body) { attachObserver(); ensure(); }
   else document.addEventListener('DOMContentLoaded', () => { attachObserver(); ensure(); });
   window.addEventListener('load', ensure);
-  // jaring pengaman bila observer terputus karena penggantian document.body
-  setInterval(() => { if (!getModal()) ensure(); }, 5000);
+  window.addEventListener('hashchange', ensure);
+  window.addEventListener('popstate', ensure);
+  // jaring pengaman bila observer terputus karena penggantian document.body atau navigasi pushState
+  let lastSeenHref = location.href;
+  setInterval(() => {
+    if (!getModal() || location.href !== lastSeenHref) {
+      lastSeenHref = location.href;
+      ensure();
+    }
+  }, 500);
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'F8') {

@@ -3,6 +3,10 @@ MASTER INPUT APPS.xlsb
 *.py
 *.png
 *.html
+*.log
 node_modules/
 dist/
+.vscode/
+kilo/
+
 
