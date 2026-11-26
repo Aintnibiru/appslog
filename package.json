@@ -1,0 +1,17 @@
+{
+  "name": "appslog-userscript",
+  "version": "8.0.0",
+  "private": true,
+  "description": "Build pipeline for the Appslog browser userscript",
+  "scripts": {
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "build:minified": "npm run typecheck && node scripts/build.mjs --minify",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "watch": "node scripts/build.mjs --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

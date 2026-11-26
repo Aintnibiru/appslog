@@ -3,4 +3,6 @@ MASTER INPUT APPS.xlsb
 *.py
 *.png
 *.html
+node_modules/
+dist/
 
