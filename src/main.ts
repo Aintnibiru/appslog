@@ -278,19 +278,22 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       "tambah baris",
       "tambah"
     ];
-    const els = Array.from(queryAll("button, a, [role='button']"))
-      .filter(el => el.offsetParent !== null && !el.disabled);
-    const withText = els.map(el => ({ el, text: normalizeText(el.innerText || el.textContent).toLowerCase() }))
+    // Teks dicek dulu memakai textContent (tidak memaksa layout). offsetParent/disabled hanya
+    // dibaca untuk kandidat yang teksnya cocok; sebelumnya setiap tombol di halaman dibaca
+    // innerText-nya (reflow) setiap kali fungsi ini dipanggil, yakni sekali per baris.
+    const candidates = Array.from(queryAll("button, a, [role='button']"))
+      .map(el => ({ el, text: normalizeText(el.textContent).toLowerCase() }))
       .filter(x => x.text);
+    const usable = (x: { el: ScriptElement }) => x.el.offsetParent !== null && !x.el.disabled;
     for (const t of texts) {
-      const exact = withText.find(x => x.text === t);
+      const exact = candidates.find(x => x.text === t && usable(x));
       if (exact) return exact.el;
     }
     for (const t of texts) {
-      const partial = withText.find(x => x.text.includes(t) && x.text.length <= t.length + 8);
+      const partial = candidates.find(x => x.text.includes(t) && x.text.length <= t.length + 8 && usable(x));
       if (partial) return partial.el;
     }
-    return withText.find(x => /^\+$/.test(x.text))?.el || null;
+    return candidates.find(x => /^\+$/.test(x.text) && usable(x))?.el || null;
   }
 
   async function clickAddButtonOnce() {
@@ -723,7 +726,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       let nearSummaryHeading = false;
       let el: HTMLElement | null = table.parentElement;
       for (let hop = 0; hop < 6 && el; hop++) {
-        const txt = normalizeText(el.innerText || el.textContent || '').toLowerCase();
+        const txt = normalizeText(el.textContent || '').toLowerCase();
         if (txt.includes('summary category')) { nearSummaryHeading = true; break; }
         el = el.parentElement;
       }
@@ -741,9 +744,10 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
   }
 
   function findRevisiButton(): ScriptElement | null {
-    const els = Array.from(queryAll("button, a, [role='button']"))
-      .filter(el => el.offsetParent !== null && !el.disabled);
-    return els.find(el => /^revisi transaksi$/i.test(normalizeText(el.innerText || el.textContent))) || null;
+    // Teks dicek lebih dulu (murah); visibilitas hanya untuk tombol yang teksnya cocok.
+    return Array.from(queryAll("button, a, [role='button']"))
+      .find(el => /^revisi transaksi$/i.test(normalizeText(el.textContent))
+        && el.offsetParent !== null && !el.disabled) || null;
   }
 
   let autoRevisiRunning = false;
@@ -753,13 +757,11 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const bar = byId('gabunganAutoBar');
     const txt = byId('gabunganAutoText');
     if (!bar || !txt) return;
-    if (!text) {
-      bar.hidden = true;
-      txt.textContent = '';
-    } else {
-      txt.textContent = text;
-      bar.hidden = false;
-    }
+    // Tulis hanya bila berubah: setiap penulisan adalah mutasi DOM yang memicu ensure().
+    const next = text || '';
+    if (txt.textContent !== next) txt.textContent = next;
+    const hidden = !text;
+    if (bar.hidden !== hidden) bar.hidden = hidden;
   }
 
   function cancelAutoRevisi() {
@@ -1523,7 +1525,28 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     ensureTimer = setTimeout(() => { ensureTimer = null; ensure(); }, 200);
   }
 
-  const mo = new MutationObserver(scheduleEnsure);
+  // Mutasi yang berasal dari UI kita sendiri (toast, teks auto-bar, isi modal) diabaikan.
+  // Tanpa ini, setAutoBar -> mutasi -> ensure -> setAutoBar berputar setiap 200 ms selama
+  // menunggu halaman tujuan. Penghapusan modal/tombol buka oleh React tetap dihitung relevan.
+  const OWN_UI_SELECTOR = '#gabunganModal, #gabunganToast, #gabunganOpenBtn';
+  const WATCHED_ROOT_SELECTOR = '#gabunganModal, #gabunganOpenBtn';
+  const elementOf = (n: Node | null): Element | null =>
+    n instanceof Element ? n : (n && n.parentElement) || null;
+  function isRelevantMutation(m: MutationRecord): boolean {
+    const targetEl = elementOf(m.target);
+    if (targetEl && targetEl.closest(OWN_UI_SELECTOR)) return false;
+    const removedRelevant = Array.from(m.removedNodes).some(n =>
+      n instanceof Element ? (n.matches(WATCHED_ROOT_SELECTOR) || !n.closest(OWN_UI_SELECTOR)) : true);
+    if (removedRelevant) return true;
+    return Array.from(m.addedNodes).some(n => {
+      const el = elementOf(n);
+      return !el || !el.closest(OWN_UI_SELECTOR);
+    });
+  }
+
+  const mo = new MutationObserver(records => {
+    if (records.some(isRelevantMutation)) scheduleEnsure();
+  });
   function attachObserver() {
     mo.observe(document.body, { childList: true, subtree: true });
   }
