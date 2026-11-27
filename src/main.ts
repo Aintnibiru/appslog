@@ -508,24 +508,30 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const resolvedKind: ToastKind = kind || (warn ? 'warn' : 'info');
     t.classList.add(`g-toast-${resolvedKind}`);
 
-    t.innerHTML = '';
-    const iconEl = document.createElement('span');
-    iconEl.className = 'g-toast-icon';
-    iconEl.setAttribute('aria-hidden', 'true');
+    // Elemen dibangun sekali; pemanggilan berikutnya cukup mengganti teksnya. Apply Material
+    // memanggil toast() per baris (progres), dan membangun ulang subtree tiap kali itu boros.
+    let iconEl = t.querySelector<HTMLElement>('.g-toast-icon');
+    let bodyEl = t.querySelector<HTMLElement>('.g-toast-msg');
+    if (!iconEl || !bodyEl) {
+      t.innerHTML = '';
+      iconEl = document.createElement('span');
+      iconEl.className = 'g-toast-icon';
+      iconEl.setAttribute('aria-hidden', 'true');
+
+      bodyEl = document.createElement('span');
+      bodyEl.className = 'g-toast-msg';
+
+      const closeEl = document.createElement('button');
+      closeEl.type = 'button';
+      closeEl.className = 'g-toast-close';
+      closeEl.setAttribute('aria-label', 'Tutup notifikasi');
+      closeEl.textContent = '×';
+      closeEl.onclick = () => dismissToast(t);
+
+      t.append(iconEl, bodyEl, closeEl);
+    }
     iconEl.textContent = TOAST_ICON[resolvedKind];
-
-    const bodyEl = document.createElement('span');
-    bodyEl.className = 'g-toast-msg';
     bodyEl.textContent = msg;
-
-    const closeEl = document.createElement('button');
-    closeEl.type = 'button';
-    closeEl.className = 'g-toast-close';
-    closeEl.setAttribute('aria-label', 'Tutup notifikasi');
-    closeEl.textContent = '×';
-    closeEl.onclick = () => dismissToast(t);
-
-    t.append(iconEl, bodyEl, closeEl);
     t._hideTimer = setTimeout(() => dismissToast(t), ms);
   }
 
@@ -1568,12 +1574,17 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     };
   });
   // jaring pengaman bila observer terputus karena penggantian document.body atau navigasi pushState
+  // Di luar halaman transaksi tidak ada yang perlu dikerjakan kecuali pergantian URL
+  // (ensure() tetap dijalankan agar modal disembunyikan dengan benar).
   let lastSeenHref = location.href;
   setInterval(() => {
-    if (!getModal() || location.href !== lastSeenHref) {
-      lastSeenHref = location.href;
+    const href = location.href;
+    if (href !== lastSeenHref) {
+      lastSeenHref = href;
       ensure();
+      return;
     }
+    if (!getModal() && isTransactionPage()) ensure();
   }, 500);
 
   document.addEventListener('keydown', (e) => {

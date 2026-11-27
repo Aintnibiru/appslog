@@ -19,11 +19,11 @@ Prioritas dan status:
 | --- | --- | --- | --- |
 | 1 | Loop `ensure()` berputar ~200 ms selama menunggu auto-revisi, karena `setAutoBar` menulis ulang teks yang sama → mutasi DOM → `ensure` → `setAutoBar`. Toast dan modal sendiri juga memicu observer. | `setAutoBar`, `mo` (MutationObserver) | **Selesai** (lihat A.2) |
 | 2 | `innerText` memaksa layout sinkron. `findAddButton` dipanggil sekali per baris saat Apply Material / Tambah Baris, dan membaca `innerText` setiap tombol di halaman. | `findAddButton`, `findRevisiButton`, `countSummaryCategoryRows` | **Selesai** (lihat A.2) |
-| 3 | `sleep()` tetap yang bisa diganti `waitFor`: `sleep(80)` di `clickAddButtonOnce`, `sleep(150)` di `applyHarga`, `sleep(250)` antar-pass di auto-revisi. | `clickAddButtonOnce`, `applyHarga`, `processAutoRevisi` | Belum |
+| 3 | `sleep()` tetap yang bisa diganti `waitFor`: `sleep(80)` di `clickAddButtonOnce`, `sleep(150)` di `applyHarga`, `sleep(250)` antar-pass di auto-revisi. | `clickAddButtonOnce`, `applyHarga`, `processAutoRevisi` | Ditunda. `sleep` di `applyHarga` adalah jendela deteksi nilai yang di-revert aplikasi; mengganti dengan `waitFor` akan menghilangkan deteksi itu. Perlu uji live sebelum diubah. |
 | 4 | `DomQueryCache` menghapus seluruh cache pada setiap mutasi `documentElement`, sehingga kemungkinan hampir tidak pernah hit di React yang terus me-render. Observer-nya ikut menambah biaya. | `src/core/dom-cache.ts`, `queryAll`/`queryOne` | Belum. Ukur hit rate dulu; bila kecil, hapus cache. |
-| 5 | Pekerjaan per `ensure()` yang tidak perlu: `hookVerifikasiTotals` memanggil `document.querySelector`, `readAutoRevisi` membaca `localStorage` + `JSON.parse`, dan `setInterval` 500 ms berjalan terus walau bukan halaman transaksi. | `ensure`, `hookVerifikasiTotals`, `readAutoRevisi`, interval 500 ms | Belum |
+| 5 | Pekerjaan per `ensure()` yang tidak perlu: `hookVerifikasiTotals` memanggil `document.querySelector`, `readAutoRevisi` membaca `localStorage` + `JSON.parse`, dan `setInterval` 500 ms berjalan terus walau bukan halaman transaksi. | `ensure`, `hookVerifikasiTotals`, `readAutoRevisi`, interval 500 ms | **Selesai sebagian** (lihat A.2: interval tidak lagi memanggil `ensure` di luar halaman transaksi) |
 | 6 | `collectHargaInputs` memanggil `getClientRects()` per input dan per cermin; setiap penulisan harga memaksa reflow. | `collectHargaInputs`, `shown` | Belum (dampak kecil) |
-| 7 | `toast()` dipanggil per baris saat Apply Material (>5 baris) dan menulis ulang `innerHTML` (memicu observer). | `applyMaterial`, `toast` | Belum (berkaitan dengan #1, sudah tertangani sebagian) |
+| 7 | `toast()` dipanggil per baris saat Apply Material (>5 baris) dan menulis ulang `innerHTML` (memicu observer). | `applyMaterial`, `toast` | **Selesai** (lihat A.2: elemen toast dibangun sekali dan hanya teksnya diganti) |
 
 Temuan kualitas kode (bukan runtime), belum dikerjakan:
 
@@ -49,6 +49,17 @@ File yang diubah: **hanya `src/main.ts`**. Perubahan ini berada di atas perubaha
 - `findAddButton()`: teks dicocokkan lebih dulu dengan `textContent` (urutan prioritas exact → partial → "+" tetap sama). `offsetParent` dan `disabled` hanya dibaca untuk kandidat yang teksnya cocok.
 - `findRevisiButton()`: pola yang sama.
 - `countSummaryCategoryRows()`: di ancestor walk, `innerText` diganti `textContent`. Ini di luar daftar awal tetapi polanya sama.
+
+**Perubahan #5 — pekerjaan interval 500 ms:**
+
+- `setInterval` sekarang hanya memanggil `ensure()` bila URL berubah, atau bila modal belum ada dan halamannya halaman transaksi. Di luar halaman transaksi tidak ada pekerjaan lain.
+- `hookVerifikasiTotals` dan `readAutoRevisi` **tidak** diubah. `readAutoRevisi` hanya dipanggil dari `processAutoRevisi` yang sudah di-gate halaman transaksi.
+
+**Perubahan #7 — toast per baris:**
+
+- `toast()` membangun elemen (ikon, pesan, tombol tutup) sekali, lalu pemanggilan berikutnya hanya mengganti `textContent`. Dampaknya kecil; sebagian besar biaya sebelumnya sudah hilang setelah perubahan #1.
+
+**Ditunda:** #3 (`sleep` → `waitFor`). Lihat tabel A.1.
 
 **Risiko yang perlu diuji live:**
 
