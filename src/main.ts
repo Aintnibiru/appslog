@@ -801,8 +801,8 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
 
   function isMaterialContext(): boolean {
     const href = location.href;
+    if (/\/target\b/i.test(href)) return false;
     return /\/transaction\/add\b/i.test(href)
-      || !!findAddButton()
       || queryAll("input[name='materialId']").length > 0;
   }
 
@@ -1429,14 +1429,27 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
   }
 
   // ---------- boot UI ----------
+  function isTransactionPage(): boolean {
+    return /\/dashboard\/activity\/transaction\b/i.test(location.pathname + location.hash);
+  }
+
+  function syncRouteVisibility() {
+    const onTx = isTransactionPage();
+    const m = getModal();
+    const btn = byId('gabunganOpenBtn');
+    if (m) m.style.display = onTx && !state.dismissed ? 'block' : 'none';
+    if (btn) btn.style.display = onTx ? 'inline-flex' : 'none';
+  }
+
   function ensure() {
-    if (!getModal()) {
+    if (isTransactionPage() && !getModal()) {
       createModal();
-      const m = getModal();
-      if (m) m.style.display = state.dismissed ? 'none' : 'block';
     }
-    syncContextTab();
-    void processAutoRevisi();
+    syncRouteVisibility();
+    if (isTransactionPage()) {
+      syncContextTab();
+      void processAutoRevisi();
+    }
   }
 
   // Pantau DOM alih-alih polling 1 detik: lebih murah dan langsung pulih saat React
@@ -1458,6 +1471,14 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
   window.addEventListener('load', ensure);
   window.addEventListener('hashchange', ensure);
   window.addEventListener('popstate', ensure);
+  (['pushState', 'replaceState'] as const).forEach(method => {
+    const original = history[method];
+    history[method] = function (...args) {
+      const ret = original.apply(this, args);
+      queueMicrotask(ensure);
+      return ret;
+    };
+  });
   // jaring pengaman bila observer terputus karena penggantian document.body atau navigasi pushState
   let lastSeenHref = location.href;
   setInterval(() => {
@@ -1469,6 +1490,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'F8') {
+      if (!isTransactionPage()) return;
       e.preventDefault();
       const m = getModal();
       if (m && m.style.display !== 'none') hideModal();
