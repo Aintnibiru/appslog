@@ -278,47 +278,59 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       "tambah baris",
       "tambah"
     ];
-    const els = Array.from(queryAll("button, a, [role='button']"))
-      .filter(el => el.offsetParent !== null && !el.disabled);
-    const withText = els.map(el => ({ el, text: normalizeText(el.innerText || el.textContent).toLowerCase() }))
+    // Teks dicek dulu memakai textContent (tidak memaksa layout). offsetParent/disabled hanya
+    // dibaca untuk kandidat yang teksnya cocok; sebelumnya setiap tombol di halaman dibaca
+    // innerText-nya (reflow) setiap kali fungsi ini dipanggil, yakni sekali per baris.
+    const candidates = Array.from(queryAll("button, a, [role='button']"))
+      .map(el => ({ el, text: normalizeText(el.textContent).toLowerCase() }))
       .filter(x => x.text);
+    const usable = (x: { el: ScriptElement }) => x.el.offsetParent !== null && !x.el.disabled;
     for (const t of texts) {
-      const exact = withText.find(x => x.text === t);
+      const exact = candidates.find(x => x.text === t && usable(x));
       if (exact) return exact.el;
     }
     for (const t of texts) {
-      const partial = withText.find(x => x.text.includes(t) && x.text.length <= t.length + 8);
+      const partial = candidates.find(x => x.text.includes(t) && x.text.length <= t.length + 8 && usable(x));
       if (partial) return partial.el;
     }
-    return withText.find(x => /^\+$/.test(x.text))?.el || null;
+    return candidates.find(x => /^\+$/.test(x.text) && usable(x))?.el || null;
   }
 
-  async function clickAddButtonOnce() {
+  // shouldStop: dicek di sela setiap klik. Dipakai auto-revisi agar tombol Batal berlaku
+  // saat baris sedang ditambahkan, bukan hanya di sela dua tahap.
+  async function clickAddButtonOnce(shouldStop?: () => boolean) {
     const addBtn = findAddButton();
     if (!addBtn) return null;
     const before = queryAll("input[name='materialId']").length;
     addBtn.click();
-    const grew = await waitFor(
-      () => queryAll("input[name='materialId']").length > before,
+    await waitFor(
+      () => queryAll("input[name='materialId']").length > before || !!(shouldStop && shouldStop()),
       // 4 detik: render baris bisa lambat (React berat, atau tab di-throttle browser saat
       // tidak aktif). Menunggu terlalu pendek membuat baris yang SUDAH muncul dilaporkan gagal.
       { timeout: 4000, interval: 15 }
     );
+    const grew = queryAll("input[name='materialId']").length > before;
     if (grew) await sleep(80);
     // Klik != berhasil: bila baris belum terkonfirmasi muncul, jangan dilaporkan sukses
     // (dulu caller tetap menghitung "ditambahkan" dan menomori baris yang salah).
     return grew ? addBtn : null;
   }
 
-  async function tambahBarisOtomatis(jumlah) {
+  async function tambahBarisOtomatis(jumlah, shouldStop?: () => boolean) {
     if (!findAddButton()) return toast('Tombol "+ Tambah Tipe Material" tidak ditemukan di layar ini.');
 
     let added = 0;
     for (let i = 0; i < jumlah; i++) {
+      if (shouldStop && shouldStop()) break;
       // Klik per klik dan tunggu barisnya benar-benar muncul (bukan klik N kali sekaligus lalu menebak 700ms).
-      const ok = await clickAddButtonOnce();
+      const ok = await clickAddButtonOnce(shouldStop);
       if (!ok) { console.warn('[Tool] baris tidak bertambah pada iterasi', i + 1); break; }
       added++;
+    }
+    // Dibatalkan: berhenti tanpa menyentuh form lebih lanjut (tidak menomori diameter).
+    if (shouldStop && shouldStop()) {
+      toast(`Dibatalkan. ${added} dari ${jumlah} baris sempat ditambahkan.`, 5000, 'warn');
+      return;
     }
     // Jangan pernah mengklaim sukses penuh bila barisnya belum terkonfirmasi muncul.
     const shortfall = jumlah - added;
@@ -505,24 +517,30 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const resolvedKind: ToastKind = kind || (warn ? 'warn' : 'info');
     t.classList.add(`g-toast-${resolvedKind}`);
 
-    t.innerHTML = '';
-    const iconEl = document.createElement('span');
-    iconEl.className = 'g-toast-icon';
-    iconEl.setAttribute('aria-hidden', 'true');
+    // Elemen dibangun sekali; pemanggilan berikutnya cukup mengganti teksnya. Apply Material
+    // memanggil toast() per baris (progres), dan membangun ulang subtree tiap kali itu boros.
+    let iconEl = t.querySelector<HTMLElement>('.g-toast-icon');
+    let bodyEl = t.querySelector<HTMLElement>('.g-toast-msg');
+    if (!iconEl || !bodyEl) {
+      t.innerHTML = '';
+      iconEl = document.createElement('span');
+      iconEl.className = 'g-toast-icon';
+      iconEl.setAttribute('aria-hidden', 'true');
+
+      bodyEl = document.createElement('span');
+      bodyEl.className = 'g-toast-msg';
+
+      const closeEl = document.createElement('button');
+      closeEl.type = 'button';
+      closeEl.className = 'g-toast-close';
+      closeEl.setAttribute('aria-label', 'Tutup notifikasi');
+      closeEl.textContent = '×';
+      closeEl.onclick = () => dismissToast(t);
+
+      t.append(iconEl, bodyEl, closeEl);
+    }
     iconEl.textContent = TOAST_ICON[resolvedKind];
-
-    const bodyEl = document.createElement('span');
-    bodyEl.className = 'g-toast-msg';
     bodyEl.textContent = msg;
-
-    const closeEl = document.createElement('button');
-    closeEl.type = 'button';
-    closeEl.className = 'g-toast-close';
-    closeEl.setAttribute('aria-label', 'Tutup notifikasi');
-    closeEl.textContent = '×';
-    closeEl.onclick = () => dismissToast(t);
-
-    t.append(iconEl, bodyEl, closeEl);
     t._hideTimer = setTimeout(() => dismissToast(t), ms);
   }
 
@@ -723,7 +741,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       let nearSummaryHeading = false;
       let el: HTMLElement | null = table.parentElement;
       for (let hop = 0; hop < 6 && el; hop++) {
-        const txt = normalizeText(el.innerText || el.textContent || '').toLowerCase();
+        const txt = normalizeText(el.textContent || '').toLowerCase();
         if (txt.includes('summary category')) { nearSummaryHeading = true; break; }
         el = el.parentElement;
       }
@@ -741,9 +759,10 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
   }
 
   function findRevisiButton(): ScriptElement | null {
-    const els = Array.from(queryAll("button, a, [role='button']"))
-      .filter(el => el.offsetParent !== null && !el.disabled);
-    return els.find(el => /^revisi transaksi$/i.test(normalizeText(el.innerText || el.textContent))) || null;
+    // Teks dicek lebih dulu (murah); visibilitas hanya untuk tombol yang teksnya cocok.
+    return Array.from(queryAll("button, a, [role='button']"))
+      .find(el => /^revisi transaksi$/i.test(normalizeText(el.textContent))
+        && el.offsetParent !== null && !el.disabled) || null;
   }
 
   let autoRevisiRunning = false;
@@ -753,13 +772,11 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const bar = byId('gabunganAutoBar');
     const txt = byId('gabunganAutoText');
     if (!bar || !txt) return;
-    if (!text) {
-      bar.hidden = true;
-      txt.textContent = '';
-    } else {
-      txt.textContent = text;
-      bar.hidden = false;
-    }
+    // Tulis hanya bila berubah: setiap penulisan adalah mutasi DOM yang memicu ensure().
+    const next = text || '';
+    if (txt.textContent !== next) txt.textContent = next;
+    const hidden = !text;
+    if (bar.hidden !== hidden) bar.hidden = hidden;
   }
 
   function cancelAutoRevisi() {
@@ -905,7 +922,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
           const toAdd = Math.max(0, targetCount - existing);
           if (toAdd === 0) break;
           setAutoBar(`Menambahkan ${toAdd} baris…`);
-          await runExclusive('Auto Tambah Baris', () => tambahBarisOtomatis(toAdd), 'btnApplyTambah');
+          await runExclusive('Auto Tambah Baris', () => tambahBarisOtomatis(toAdd, () => autoRevisiCancelled), 'btnApplyTambah');
           await sleep(250);
           if (autoRevisiCancelled) return;
         }
@@ -1523,7 +1540,28 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     ensureTimer = setTimeout(() => { ensureTimer = null; ensure(); }, 200);
   }
 
-  const mo = new MutationObserver(scheduleEnsure);
+  // Mutasi yang berasal dari UI kita sendiri (toast, teks auto-bar, isi modal) diabaikan.
+  // Tanpa ini, setAutoBar -> mutasi -> ensure -> setAutoBar berputar setiap 200 ms selama
+  // menunggu halaman tujuan. Penghapusan modal/tombol buka oleh React tetap dihitung relevan.
+  const OWN_UI_SELECTOR = '#gabunganModal, #gabunganToast, #gabunganOpenBtn';
+  const WATCHED_ROOT_SELECTOR = '#gabunganModal, #gabunganOpenBtn';
+  const elementOf = (n: Node | null): Element | null =>
+    n instanceof Element ? n : (n && n.parentElement) || null;
+  function isRelevantMutation(m: MutationRecord): boolean {
+    const targetEl = elementOf(m.target);
+    if (targetEl && targetEl.closest(OWN_UI_SELECTOR)) return false;
+    const removedRelevant = Array.from(m.removedNodes).some(n =>
+      n instanceof Element ? (n.matches(WATCHED_ROOT_SELECTOR) || !n.closest(OWN_UI_SELECTOR)) : true);
+    if (removedRelevant) return true;
+    return Array.from(m.addedNodes).some(n => {
+      const el = elementOf(n);
+      return !el || !el.closest(OWN_UI_SELECTOR);
+    });
+  }
+
+  const mo = new MutationObserver(records => {
+    if (records.some(isRelevantMutation)) scheduleEnsure();
+  });
   function attachObserver() {
     mo.observe(document.body, { childList: true, subtree: true });
   }
@@ -1545,12 +1583,17 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     };
   });
   // jaring pengaman bila observer terputus karena penggantian document.body atau navigasi pushState
+  // Di luar halaman transaksi tidak ada yang perlu dikerjakan kecuali pergantian URL
+  // (ensure() tetap dijalankan agar modal disembunyikan dengan benar).
   let lastSeenHref = location.href;
   setInterval(() => {
-    if (!getModal() || location.href !== lastSeenHref) {
-      lastSeenHref = location.href;
+    const href = location.href;
+    if (href !== lastSeenHref) {
+      lastSeenHref = href;
       ensure();
+      return;
     }
+    if (!getModal() && isTransactionPage()) ensure();
   }, 500);
 
   document.addEventListener('keydown', (e) => {
