@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Gabungan: Quick Redirect + Tambah Baris + Paste Material + Paste Harga (draggable)
 // @namespace http://tampermonkey.net/
-// @version 8.0.0
-// @description Modal 4-in-1: Quick Redirect | Tambah Baris | Paste Material | Paste Harga — draggable, stay-open (F8 to open)
+// @version 8.1.0
+// @description Modal 4-in-1: Quick Redirect | Tambah Baris | Paste Material | Paste Harga — draggable, stay-open (F8 to open). Dialog verifikasi: tabel rincian dirapatkan (muat tanpa scroll) + kolom Total dibekukan di kanan.
 // @match https://appslog.sampoernakayoe.co.id/*
 // @noframes
 // @grant none

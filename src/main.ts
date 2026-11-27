@@ -1050,6 +1050,39 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     #gabunganModal #gabunganContent > [role="tabpanel"]:not([hidden]), #gabunganModal button.is-busy::before,
     #gabunganToast, #gabunganToast.is-leaving { transition:none; animation:none; }
   }
+  /* ---- Dialog "Verifikasi transaksi?": total dibekukan di kanan ----
+     Tabel rinciannya 12 kolom di dalam kotak ber-overflow-x. Kolom Material ID memang
+     sudah sticky kiri dari aplikasinya, jadi dua kolom terakhir ikut dibekukan:
+     Status di right:0, dan Total Transaksi di right = lebar kolom Status (diukur oleh
+     hookVerifikasiTotals, karena teks pil status bisa melebar/menyempit).
+     z-index 22 supaya tetap di atas sel sticky lain (aplikasi memakai z 10/11/20). */
+  [aria-label="Rincian verifikasi"].g-verif-freeze thead th:last-child,
+  [aria-label="Rincian verifikasi"].g-verif-freeze tbody td:last-child,
+  [aria-label="Rincian verifikasi"].g-verif-freeze tfoot td:last-child {
+    position:sticky; right:0; z-index:22; }
+  [aria-label="Rincian verifikasi"].g-verif-freeze thead th:nth-last-child(2),
+  [aria-label="Rincian verifikasi"].g-verif-freeze tbody td:nth-last-child(2),
+  [aria-label="Rincian verifikasi"].g-verif-freeze tfoot td:nth-last-child(2) {
+    position:sticky; right:var(--g-verif-status-w, 88px); z-index:22;
+    box-shadow:inset 1px 0 0 rgba(15,23,42,.12), -10px 0 12px -10px rgba(15,23,42,.28); }
+  /* ---- Dialog "Verifikasi transaksi?": semua kolom muat tanpa scroll samping ----
+     Dengan gaya asli (sel 15px, padding px-3, header satu baris nowrap) tabel 12 kolom
+     butuh ~1508px, sedangkan dialog hanya memberi ~1090px. Daripada user scroll, tabel
+     dirapatkan: header 11.5px boleh 2 baris, sel 13px, padding 4px/6px. Diukur di halaman
+     asli: muat (0 px luber, tanpa sel terpotong) sejak lebar dialog 870px.
+     h-[40px] header harus dilepas (height:auto), kalau tidak baris kedua header terpotong. */
+  [aria-label="Rincian verifikasi"].g-verif-fit thead th {
+    height:auto; padding:4px 6px; font-size:11.5px; line-height:1.25;
+    white-space:normal; vertical-align:middle; }
+  [aria-label="Rincian verifikasi"].g-verif-fit tbody td,
+  [aria-label="Rincian verifikasi"].g-verif-fit tfoot td,
+  [aria-label="Rincian verifikasi"].g-verif-fit tfoot th { padding:4px 6px; font-size:13px; }
+  /* Langkah kedua, hanya dipasang hookVerifikasiTotals bila langkah pertama masih luber
+     (dialog sempit): sel 11.5px + padding 3px/5px, muat sejak lebar dialog 791px. */
+  [aria-label="Rincian verifikasi"].g-verif-fit.g-verif-tight thead th { padding:3px 5px; font-size:10.5px; }
+  [aria-label="Rincian verifikasi"].g-verif-fit.g-verif-tight tbody td,
+  [aria-label="Rincian verifikasi"].g-verif-fit.g-verif-tight tfoot td,
+  [aria-label="Rincian verifikasi"].g-verif-fit.g-verif-tight tfoot th { padding:3px 5px; font-size:11.5px; }
     `;
 
     const ICON = {
@@ -1434,11 +1467,47 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     if (btn) btn.style.display = onTx ? 'inline-flex' : 'none';
   }
 
+  // ---------- Dialog "Verifikasi transaksi?": total selalu terlihat ----------
+  // Dialog ini hanya punya satu kotak scroll ke samping; Total Transaksi ada di kolom
+  // ke-11 sehingga total rupiah baru terlihat setelah scroll kanan. Hook ini merapatkan
+  // tipografi tabel supaya 12 kolom muat sekaligus (.g-verif-fit), lalu tetap membekukan
+  // Status + Total Transaksi di kanan (.g-verif-freeze) sebagai jaring pengaman bila
+  // dialognya terlalu sempit dan tabel tetap harus di-scroll. Berjalan dari ensure(),
+  // jadi dialog yang di-render ulang Svelte tetap ikut terpasang.
+  const VERIF_REGION_SELECTOR = '[aria-label="Rincian verifikasi"]';
+  // Lebar dialog saat ukuran rapat terakhir dipilih; layout menentukan lebarnya, jadi
+  // cukup dihitung ulang saat lebar berubah (dialog dibuka / jendela di-resize).
+  let verifFitWidth = -1;
+
+  function hookVerifikasiTotals() {
+    const region = document.querySelector<HTMLElement>(VERIF_REGION_SELECTOR);
+    if (!region) return;
+    if (!region.querySelector('table') || !region.querySelector('thead th:last-child')) return;
+
+    region.classList.add('g-verif-fit', 'g-verif-freeze');
+
+    // Diukur SETELAH kelas terpasang: lebar kolom Status ikut menyusut saat header dan
+    // padding dirapatkan, dan offset kolom Total harus memakai lebar yang baru.
+    const statusWidth = Math.round(
+      region.querySelector('thead th:last-child').getBoundingClientRect().width
+    );
+    if (statusWidth > 0) region.style.setProperty('--g-verif-status-w', statusWidth + 'px');
+
+    const width = region.clientWidth;
+    if (width <= 0 || width === verifFitWidth) return;
+    verifFitWidth = width;
+    // Membaca scrollWidth memaksa layout ulang, jadi angka di bawah sudah memakai
+    // .g-verif-fit tanpa .g-verif-tight (tidak ada osilasi antar dua keadaan).
+    region.classList.remove('g-verif-tight');
+    if (region.scrollWidth > region.clientWidth) region.classList.add('g-verif-tight');
+  }
+
   function ensure() {
     if (isTransactionPage() && !getModal()) {
       createModal();
     }
     syncRouteVisibility();
+    hookVerifikasiTotals();
     if (isTransactionPage()) {
       syncContextTab();
       void processAutoRevisi();
@@ -1462,6 +1531,9 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
   if (document.body) { attachObserver(); ensure(); }
   else document.addEventListener('DOMContentLoaded', () => { attachObserver(); ensure(); });
   window.addEventListener('load', ensure);
+  // Lebar kolom Status ikut berubah saat jendela di-resize; offset kolom Total harus
+  // diukur ulang agar kedua kolom beku tetap menempel tanpa celah.
+  window.addEventListener('resize', hookVerifikasiTotals);
   window.addEventListener('hashchange', ensure);
   window.addEventListener('popstate', ensure);
   (['pushState', 'replaceState'] as const).forEach(method => {
