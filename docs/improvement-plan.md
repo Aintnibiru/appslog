@@ -59,6 +59,12 @@ File yang diubah: **hanya `src/main.ts`**. Perubahan ini berada di atas perubaha
 
 - `toast()` membangun elemen (ikon, pesan, tombol tutup) sekali, lalu pemanggilan berikutnya hanya mengganti `textContent`. Dampaknya kecil; sebagian besar biaya sebelumnya sudah hilang setelah perubahan #1.
 
+**Perbaikan tombol Batal saat menambah baris (auto-revisi):**
+
+- Sebelumnya `autoRevisiCancelled` hanya diperiksa di sela dua tahap, sehingga Batal tidak berlaku saat `tambahBarisOtomatis` sedang berjalan (bisa puluhan baris).
+- Sekarang `tambahBarisOtomatis(jumlah, shouldStop)` memeriksa `shouldStop` sebelum setiap klik, dan `clickAddButtonOnce` berhenti menunggu baris begitu Batal ditekan. Pemanggilan manual (tombol "+ Tambah Baris") tidak memberi `shouldStop`, sehingga tidak terpengaruh flag Batal yang tertinggal.
+- Setelah dibatalkan, fungsi berhenti tanpa menomori diameter dan menampilkan toast berisi jumlah baris yang sempat ditambahkan.
+
 **Ditunda:** #3 (`sleep` → `waitFor`). Lihat tabel A.1.
 
 **Risiko yang perlu diuji live:**

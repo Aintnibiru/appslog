@@ -296,32 +296,41 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     return candidates.find(x => /^\+$/.test(x.text) && usable(x))?.el || null;
   }
 
-  async function clickAddButtonOnce() {
+  // shouldStop: dicek di sela setiap klik. Dipakai auto-revisi agar tombol Batal berlaku
+  // saat baris sedang ditambahkan, bukan hanya di sela dua tahap.
+  async function clickAddButtonOnce(shouldStop?: () => boolean) {
     const addBtn = findAddButton();
     if (!addBtn) return null;
     const before = queryAll("input[name='materialId']").length;
     addBtn.click();
-    const grew = await waitFor(
-      () => queryAll("input[name='materialId']").length > before,
+    await waitFor(
+      () => queryAll("input[name='materialId']").length > before || !!(shouldStop && shouldStop()),
       // 4 detik: render baris bisa lambat (React berat, atau tab di-throttle browser saat
       // tidak aktif). Menunggu terlalu pendek membuat baris yang SUDAH muncul dilaporkan gagal.
       { timeout: 4000, interval: 15 }
     );
+    const grew = queryAll("input[name='materialId']").length > before;
     if (grew) await sleep(80);
     // Klik != berhasil: bila baris belum terkonfirmasi muncul, jangan dilaporkan sukses
     // (dulu caller tetap menghitung "ditambahkan" dan menomori baris yang salah).
     return grew ? addBtn : null;
   }
 
-  async function tambahBarisOtomatis(jumlah) {
+  async function tambahBarisOtomatis(jumlah, shouldStop?: () => boolean) {
     if (!findAddButton()) return toast('Tombol "+ Tambah Tipe Material" tidak ditemukan di layar ini.');
 
     let added = 0;
     for (let i = 0; i < jumlah; i++) {
+      if (shouldStop && shouldStop()) break;
       // Klik per klik dan tunggu barisnya benar-benar muncul (bukan klik N kali sekaligus lalu menebak 700ms).
-      const ok = await clickAddButtonOnce();
+      const ok = await clickAddButtonOnce(shouldStop);
       if (!ok) { console.warn('[Tool] baris tidak bertambah pada iterasi', i + 1); break; }
       added++;
+    }
+    // Dibatalkan: berhenti tanpa menyentuh form lebih lanjut (tidak menomori diameter).
+    if (shouldStop && shouldStop()) {
+      toast(`Dibatalkan. ${added} dari ${jumlah} baris sempat ditambahkan.`, 5000, 'warn');
+      return;
     }
     // Jangan pernah mengklaim sukses penuh bila barisnya belum terkonfirmasi muncul.
     const shortfall = jumlah - added;
@@ -913,7 +922,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
           const toAdd = Math.max(0, targetCount - existing);
           if (toAdd === 0) break;
           setAutoBar(`Menambahkan ${toAdd} baris…`);
-          await runExclusive('Auto Tambah Baris', () => tambahBarisOtomatis(toAdd), 'btnApplyTambah');
+          await runExclusive('Auto Tambah Baris', () => tambahBarisOtomatis(toAdd, () => autoRevisiCancelled), 'btnApplyTambah');
           await sleep(250);
           if (autoRevisiCancelled) return;
         }
