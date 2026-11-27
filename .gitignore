@@ -1,12 +1,24 @@
-MASTER INPUT APPS.xlsb
-~$MASTER INPUT APPS.xlsb
-*.py
-*.png
-*.html
-*.log
+# Dependensi & artefak build
 node_modules/
 dist/
+.node/
+npm-debug.log*
+
+# Data kerja (Excel master) + lock file Office
+*.xlsb
+~$*.xlsb
+
+# Editor / OS
 .vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Alat lokal lain yang tidak dipakai repo ini
 kilo/
 
+# Artefak harness: dibuat ulang oleh `python tests/harness/build_mock_harness.py`
+tests/harness/out/
 
+# Log sesi / skrip
+*.log

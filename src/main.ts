@@ -386,14 +386,13 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const wideRows = rowsData.map((p, i) => ({ i, n: p.length })).filter(x => x.n > 6);
     if (wideRows.length) {
       const detail = wideRows.slice(0, 5).map(x => `baris ${x.i + 1}: ${x.n} kolom`).join('\n');
-      return toast(`Apply Material dibatalkan: ${wideRows.length} baris punya lebih dari 6 kolom.\nSalin hanya kolom TIPE, PJG, GRADE, DIAMETER, PCS, HARGA.\n\n${detail}`, 9000);
+      return toast(`Apply Material dibatalkan: ${wideRows.length} baris punya lebih dari 6 kolom.\nSalin hanya kolom TIPE, PJG, GRADE, DIAMETER, PCS (kolom HARGA boleh ikut, akan diabaikan).\n\n${detail}`, 9000);
     }
 
     let containers = getRowContainers();
 
     let success = 0, fail = 0;
     const problems = [];
-    const notes = [];
 
     for (let i = 0; i < rowsData.length; i++) {
       // Umpan balik progres untuk daftar panjang: 38 baris tidak selesai sekejap, dan tanpa
@@ -405,7 +404,9 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       const grade = parts[2] ?? '';
       const diameter = parts[3] ?? '';
       const pcs = parts[4] ?? '';
-      const harga = parts[5] ?? '';
+      // Kolom ke-6 (biasanya HARGA hasil salin Excel) sengaja tidak dipakai: baris
+      // material tidak punya input harga, dan harga diisi lewat tab Harga. Nilainya
+      // dibuang tanpa laporan supaya paste 6 kolom dari Excel tetap nyaman.
 
       try {
         if (i >= containers.length) {
@@ -442,16 +443,9 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
         } else {
           const diameterInput = row.querySelector("input[placeholder*='diameter' i]") || row.querySelector("input[aria-label*='diameter' i]") || row.querySelector("input[type='number']");
           const pcsInput = row.querySelector("input[placeholder*='pcs' i]") || row.querySelector("input[name*='pcs' i]");
-          const hargaInput = row.querySelector("input[placeholder*='harga' i]");
 
           if (diameter && !setNativeValue(diameterInput, diameter)) missed.push('Diameter');
           if (pcs && !setNativeValue(pcsInput, pcs)) missed.push('PCS');
-          // Kolom harga opsional: baris material di form tambah transaksi memang tidak
-          // punya input harga, jadi dulu baris dihitung "gagal" padahal semua benar.
-          if (harga) {
-            if (hargaInput) { if (!setNativeValue(hargaInput, harga)) missed.push('Harga'); }
-            else notes.push(`baris ${i + 1}: kolom harga diabaikan (tidak ada input harga di baris ini)`);
-          }
 
           if (missed.length) {
             problems.push(`baris ${i + 1}: ${missed.join(', ')}`);
@@ -467,9 +461,8 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
       }
     }
 
-    const allNotes = problems.concat(notes);
-    const detail = allNotes.length ? '\n\n' + allNotes.slice(0, 8).join('\n') + (allNotes.length > 8 ? `\n… ${allNotes.length - 8} lainnya` : '') : '';
-    toast(`Apply Material: sukses ${success}, gagal ${fail}.${detail}`, allNotes.length ? 8000 : 3500);
+    const detail = problems.length ? '\n\n' + problems.slice(0, 8).join('\n') + (problems.length > 8 ? `\n… ${problems.length - 8} lainnya` : '') : '';
+    toast(`Apply Material: sukses ${success}, gagal ${fail}.${detail}`, problems.length ? 8000 : 3500);
   }
 
   // ---------- Toast (non-blocking, pengganti alert) ----------
@@ -793,7 +786,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
     const note = byId('gabunganNote');
     const NOTE: Record<string, string> = {
       Redirect: 'Tempel tanggal + nomor (dari Excel pun boleh). Enter = Auto Revisi.',
-      Material: 'Format: Tipe Panjang Grade Diameter PCS [Harga] — satu baris per item',
+      Material: 'Format: Tipe Panjang Grade Diameter PCS — kolom HARGA diabaikan, isi harga di tab Harga',
       Harga: 'Satu angka per baris. Pemisah ribuan (1.234.567 / 1,234,567) dikenali.'
     };
     if (note) note.textContent = NOTE[which] || '';
@@ -1140,7 +1133,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
             <input id="inputJumlahBaris" type="number" min="1" placeholder="Tambah baris manual...">
             <button id="btnApplyTambah" type="button" class="g-ghost">+ Tambah Baris</button>
           </div>
-          <textarea id="textareaMaterial" placeholder="Tipe Panjang Grade Diameter PCS [Harga]&#10;Sebaiknya paste langsung dari Excel (antar kolom berupa TAB)"></textarea>
+          <textarea id="textareaMaterial" placeholder="Tipe Panjang Grade Diameter PCS&#10;Kolom HARGA dari Excel diabaikan — isi harga lewat tab Harga&#10;Sebaiknya paste langsung dari Excel (antar kolom berupa TAB)"></textarea>
           <div class="g-actions">
             <button id="btnApplyMaterial" type="button" class="g-primary">Apply Material</button>
             <button id="btnClearMaterial" type="button" class="g-ghost">Clear</button>
@@ -1196,7 +1189,7 @@ import { doQuickRedirect, parseRedirectParts, adjustIdForPath } from './features
 
     const NOTE = {
       Redirect: 'Tempel tanggal + nomor (dari Excel pun boleh). Enter = Auto Revisi.',
-      Material: 'Format: Tipe Panjang Grade Diameter PCS [Harga] — satu baris per item',
+      Material: 'Format: Tipe Panjang Grade Diameter PCS — kolom HARGA diabaikan, isi harga di tab Harga',
       Harga: 'Satu angka per baris. Pemisah ribuan (1.234.567 / 1,234,567) dikenali.'
     };
     const PANELS = ['Redirect', 'Material', 'Harga'];
